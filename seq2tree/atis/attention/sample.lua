@@ -104,11 +104,14 @@ cmd:option('-temperature',1,'temperature of sampling')
 cmd:option('-beam_size',20,'beam size')
 cmd:option('-gpuid',0,'which gpu to use. -1 = use CPU')
 cmd:option('-display',1,'whether display on console')
+cmd:option('-output','','output file')
 cmd:text()
 
 -- parse input params
 opt = cmd:parse(arg)
-opt.output = opt.model .. '.sample'
+if opt.output == '' then
+  opt.output = opt.model .. '.sample'
+end
 
 -- initialize gpu/cpu
 init_device(opt)

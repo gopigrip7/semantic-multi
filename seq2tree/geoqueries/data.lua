@@ -95,3 +95,4 @@ opt = cmd:parse(arg)
 
 process_train_data(opt)
 serialize_data(opt, opt.test)
+serialize_data(opt, opt.test .. '.orig')

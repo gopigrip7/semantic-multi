@@ -24,10 +24,17 @@ function float_transfer_data(x)
   return x
 end
 
-function lstm_enc(x, prev_c, prev_h)
+function lstm_enc(x, prev_c, prev_h, layer_idx)
   -- Calculate all four gates in one go
-  local i2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(x)
-  local h2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(prev_h)
+  local i2h
+  local module_name = 'enc_i2h_'..layer_idx
+  if layer_idx == 1 then
+    i2h = nn.Linear(opt.embedding_size, 4 * opt.rnn_size)(x):annotate{name=module_name}
+  else
+    i2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(x):annotate{name=module_name}
+  end
+  module_name = 'enc_h2h_'..layer_idx
+  local h2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(prev_h):annotate{name=module_name}
   local gates = nn.CAddTable()({i2h, h2h})
   
   -- Reshape to (batch_size, n_gates, hid_size)
@@ -54,11 +61,18 @@ function lstm_enc(x, prev_c, prev_h)
   return next_c, next_h
 end
 
-function lstm_dec(x, prev_c, prev_h, parent_h)
+function lstm_dec(x, prev_c, prev_h, parent_h, layer_idx)
   -- Calculate all four gates in one go
   local i = nn.JoinTable(2)({x, parent_h})
-  local i2h = nn.Linear(2 * opt.rnn_size, 4 * opt.rnn_size)(i)
-  local h2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(prev_h)
+  local i2h
+  local module_name = 'dec_i2h_'..layer_idx
+  if layer_idx == 1 then
+    i2h = nn.Linear(opt.embedding_size+opt.rnn_size, 4 * opt.rnn_size)(i):annotate{name=module_name}
+  else
+    i2h = nn.Linear(2 * opt.rnn_size, 4 * opt.rnn_size)(i):annotate{name=module_name}
+  end
+  module_name = 'dec_h2h_'..layer_idx
+  local h2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(prev_h):annotate{name=module_name}
   local gates = nn.CAddTable()({i2h, h2h})
   
   -- Reshape to (batch_size, n_gates, hid_size)
@@ -90,7 +104,7 @@ function create_enc_lstm_unit(w_size)
   local x = nn.Identity()()
   local prev_s = nn.Identity()()
 
-  local i = {[0] = nn.LookupTable(w_size, opt.rnn_size)(x):annotate{name='lstm'}}
+  local i = {[0] = nn.LookupTable(w_size, opt.embedding_size)(x):annotate{name='enc_lookup'}}
   local next_s = {}
   local splitted = {prev_s:split(2 * opt.num_layers)}
   for layer_idx = 1, opt.num_layers do
@@ -100,7 +114,7 @@ function create_enc_lstm_unit(w_size)
     if opt.dropout > 0 then
       x_in = nn.Dropout(opt.dropout)(x_in)
     end
-    local next_c, next_h = lstm_enc(x_in, prev_c, prev_h)
+    local next_c, next_h = lstm_enc(x_in, prev_c, prev_h, layer_idx)
     table.insert(next_s, next_c)
     table.insert(next_s, next_h)
     i[layer_idx] = next_h
@@ -116,7 +130,7 @@ function create_dec_lstm_unit(w_size)
   local prev_s = nn.Identity()()
   local parent_h = nn.Identity()()
 
-  local i = {[0] = nn.LookupTable(w_size, opt.rnn_size)(x):annotate{name='lstm'}}
+  local i = {[0] = nn.LookupTable(w_size, opt.embedding_size)(x):annotate{name='dec_lookup'}}
   local next_s = {}
   local splitted = {prev_s:split(2 * opt.num_layers)}
   for layer_idx = 1, opt.num_layers do
@@ -126,7 +140,7 @@ function create_dec_lstm_unit(w_size)
     if opt.dropout > 0 then
       x_in = nn.Dropout(opt.dropout)(x_in)
     end
-    local next_c, next_h = lstm_dec(x_in, prev_c, prev_h, parent_h)
+    local next_c, next_h = lstm_dec(x_in, prev_c, prev_h, parent_h, layer_idx)
     table.insert(next_s, next_c)
     table.insert(next_s, next_h)
     i[layer_idx] = next_h
@@ -146,12 +160,12 @@ function create_attention_unit(w_size)
   local attention = nn.SoftMax()(nn.Sum(3)(dot))
   -- (batch*length*H)^T * (batch*length*1) = (batch*H*1)
   local enc_attention = nn.MM(true, false)({enc_s_top, nn.View(-1, 1):setNumInputDims(1)(attention)})
-  local hid = nn.Tanh()(nn.Linear(2*opt.rnn_size, opt.rnn_size)(nn.JoinTable(2)({nn.Sum(3)(enc_attention), dec_s_top})))
+  local hid = nn.Tanh()(nn.Linear(2*opt.rnn_size, opt.rnn_size)(nn.JoinTable(2)({nn.Sum(3)(enc_attention), dec_s_top})):annotate{name='att_hid'})
   local h2y_in = hid
   if opt.dropout > 0 then
     h2y_in = nn.Dropout(opt.dropout)(h2y_in)
   end
-  local h2y = nn.Linear(opt.rnn_size, w_size)(h2y_in)
+  local h2y = nn.Linear(opt.rnn_size, w_size)(h2y_in):annotate{name='att_h2y'}
   local pred = nn.LogSoftMax()(h2y)
   local m = nn.gModule({enc_s_top, dec_s_top}, {pred})
   
@@ -271,6 +285,7 @@ function eval_training(param_x_)
   
   -- load batch data
   local enc_batch, enc_len_batch, dec_tree_batch = train_loader:random_batch()
+
   -- ship batch data to gpu
   enc_batch = float_transfer_data(enc_batch)
 
@@ -498,6 +513,9 @@ function main()
   cmd:option('-decay_rate',0.95,'decay rate for rmsprop')
 
   cmd:option('-grad_clip',5,'clip gradients at this value')
+
+  cmd:option('-embedding_size', 200, 'dimension of word embedding')
+  cmd:option('-train', 'train', 'train file')
   cmd:text()
   opt = cmd:parse(arg)
 
@@ -509,7 +527,7 @@ function main()
 
   -- load data
   train_loader = seq2tree.MinibatchLoader()
-  train_loader:create(opt, 'train')
+  train_loader:create(opt, opt.train)
 
   -- make sure output directory exists
   if not path.exists(opt.checkpoint_dir) then

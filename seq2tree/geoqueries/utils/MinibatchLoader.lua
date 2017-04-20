@@ -34,7 +34,10 @@ function MinibatchLoader:create(opt, name)
   local p = 0
   while p + opt.batch_size <= #data do
     -- build enc matrix --------------------------------
-    local max_len = #data[p + opt.batch_size][1]
+    local max_len = 0
+    for i = 1, opt.batch_size do
+      if #data[p + i][1] > max_len then max_len = #data[p + i][1] end
+    end
     local m_text = torch.zeros(opt.batch_size, max_len + 2)
     local enc_len_list = {}
     -- add <S>
