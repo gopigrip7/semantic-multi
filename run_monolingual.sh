@@ -1,5 +1,5 @@
 set -e -x
-# ./run_baseline.sh seq2tree [geoqueries|atis] attention lang param_file param_id
+# ./run_monolingual.sh seq2tree [geoqueries|atis] attention lang param_file param_id
 
 if [ -z $7 ] ; then
   GPU_ID=0
