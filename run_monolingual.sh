@@ -7,7 +7,7 @@ else
   GPU_ID=$7
 fi
 
-mkdir -p logs/$4
+mkdir -p logs/$2-$4
 
 if [ $3 = "lstm" ] || [ $3 = "attention" ] ; then
   PWD_DIR=$(pwd)
