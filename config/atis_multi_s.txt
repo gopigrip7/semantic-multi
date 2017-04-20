@@ -1,0 +1,3 @@
+-batch_size 20 -dropout 0.3 -dropoutrec 0.3 -embedding_size 200 -enc_seq_length 60 -learning_rate 0.007 -max_epochs 390 -rnn_size 200 -switch_after 500 -learning_rate_decay_after 20
+-batch_size 20 -dropout 0.3 -dropoutrec 0.3 -embedding_size 200 -enc_seq_length 60 -learning_rate 0.007 -max_epochs 390 -rnn_size 200 -switch_after 500 -learning_rate_decay_after 20 -seed 1337 -pretrain_number 2
+-batch_size 20 -dropout 0.3 -dropoutrec 0.3 -embedding_size 200 -enc_seq_length 60 -learning_rate 0.007 -max_epochs 390 -rnn_size 200 -switch_after 500 -learning_rate_decay_after 20 -seed 42 -pretrain_number 3
