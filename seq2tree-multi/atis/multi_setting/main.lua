@@ -40,7 +40,7 @@ function init_weights()
   local atts = {}
   local decoders = {}
   for i=1, #opt.lang do
-    local checkpoint = torch.load(path.join(opt.init_weight_dir, opt.lang[i].."-"..opt.pretrain_number, "model.t7"))
+    local checkpoint = torch.load(path.join(opt.init_weight_dir, opt.lang[i].."-" .. opt.pretrain_number, "model.t7"))
     table.insert(encoders, checkpoint.enc_rnn_unit)
     table.insert(atts, checkpoint.dec_att_unit)
     table.insert(decoders, checkpoint.dec_rnn_unit)
@@ -48,38 +48,88 @@ function init_weights()
 
   local num_enc = #opt.lang
   local m, node1, node2
+  local node_att_hid = find_node(model.dec_att_unit, 'att_hid')
+  local node_att_h2y = find_node(model.dec_att_unit, 'att_h2y')
   for enc_id = 1, num_enc do
     ---- copy encoder params ----
     m = encoders[enc_id]
     -- copy lookup table
-    node1 = find_node(model.enc_rnn_unit[enc_id], 'enc_lookup')
+    node1 = find_node(model.enc_rnn_unit, 'enc'..enc_id..'_lookup')
     node2 = find_node(m, 'enc_lookup')
     node1.data.module.weight:copy(node2.data.module.weight)
     for layer_idx = 1, opt.num_layers do
       -- copy i2h weight and bias
-      node1 = find_node(model.enc_rnn_unit[enc_id], 'enc_i2h_'..layer_idx)
+      node1 = find_node(model.enc_rnn_unit, 'enc'..enc_id..'_i2h_'..layer_idx)
       node2 = find_node(m, 'enc_i2h_'..layer_idx)
       node1.data.module.weight:copy(node2.data.module.weight)
       node1.data.module.bias:copy(node2.data.module.bias)
       -- copy h2h weight and bias
-      node1 = find_node(model.enc_rnn_unit[enc_id], 'enc_h2h_'..layer_idx)
+      node1 = find_node(model.enc_rnn_unit, 'enc'..enc_id..'_h2h_'..layer_idx)
       node2 = find_node(m, 'enc_h2h_'..layer_idx)
       node1.data.module.weight:copy(node2.data.module.weight)
       node1.data.module.bias:copy(node2.data.module.bias)
     end
+
+    ---- copy attention params ----
+    m = atts[enc_id]
+    if enc_id == init_lang_id then
+      -- h2y
+      node1 = node_att_h2y
+      node2 = find_node(m, 'att_h2y')
+      node1.data.module.weight:copy(node2.data.module.weight)
+      node1.data.module.bias:copy(node2.data.module.bias)
+    end
+    
+    -- hid
+    node1 = node_att_hid
+    node2 = find_node(m, 'att_hid')
+    if opt.att == 'sent' then
+      if enc_id == 1 then -- we'll perform addition, so zero the tensors first
+        node1.data.module.weight[{{}, {num_enc*opt.rnn_size+1, (num_enc+1)*opt.rnn_size}}]:zero()
+        node1.data.module.bias:zero()
+      end
+      node1.data.module.weight[{{}, {(enc_id-1)*opt.rnn_size+1, enc_id*opt.rnn_size}}]:copy(node2.data.module.weight[{{}, {1,opt.rnn_size}}])
+      node1.data.module.weight[{{}, {num_enc*opt.rnn_size+1, (num_enc+1)*opt.rnn_size}}]:add(node2.data.module.weight[{{}, {opt.rnn_size+1,2*opt.rnn_size}}])
+      node1.data.module.bias:add(node2.data.module.bias)
+    end
+
+    if opt.att == 'word' and enc_id == init_lang_id then
+      node1.data.module.weight:copy(node2.data.module.weight)
+      node1.data.module.bias:copy(node2.data.module.bias)
+    end
+
+    ---- copy decoder params ----
+    if enc_id == init_lang_id then
+      m = decoders[enc_id]
+      node1 = find_node(model.dec_rnn_unit, 'dec_lookup')
+      node2 = find_node(m, 'dec_lookup')
+      node1.data.module.weight:copy(node2.data.module.weight)
+      for layer_idx = 1, opt.num_layers do
+        -- copy i2h weight and bias
+        node1 = find_node(model.dec_rnn_unit, 'dec_i2h_'..layer_idx)
+        node2 = find_node(m, 'dec_i2h_'..layer_idx)
+        node1.data.module.weight:copy(node2.data.module.weight)
+        node1.data.module.bias:copy(node2.data.module.bias)
+        -- copy h2h weight and bias
+        node1 = find_node(model.dec_rnn_unit, 'dec_h2h_'..layer_idx)
+        node2 = find_node(m, 'dec_h2h_'..layer_idx)
+        node1.data.module.weight:copy(node2.data.module.weight)
+        node1.data.module.bias:copy(node2.data.module.bias)
+      end
+    end
   end
 end
 
-function lstm_enc(x, prev_c, prev_h, layer_idx)
+function lstm_enc(x, prev_c, prev_h, layer_idx, enc_id)
   -- Calculate all four gates in one go
   local i2h
-  local module_name = 'enc_i2h_'..layer_idx
+  local module_name = 'enc'..enc_id..'_i2h_'..layer_idx
   if layer_idx == 1 then
     i2h = nn.Linear(opt.embedding_size, 4 * opt.rnn_size)(x):annotate{name=module_name}
   else
     i2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(x):annotate{name=module_name}
   end
-  module_name = 'enc_h2h_'..layer_idx
+  module_name = 'enc'..enc_id..'_h2h_'..layer_idx
   local h2h = nn.Linear(opt.rnn_size, 4 * opt.rnn_size)(prev_h):annotate{name=module_name}
   local gates = nn.CAddTable()({i2h, h2h})
   
@@ -150,7 +200,7 @@ function create_enc_lstm_unit(w_size)
   local x = nn.Identity()()
   local prev_s = nn.Identity()()
 
-  local i = {[0] = nn.LookupTable(w_size, opt.embedding_size)(x):annotate{name='enc_lookup'}}
+  local i = {[0] = nn.LookupTable(w_size, opt.embedding_size)(x):annotate{name='lstm'}}
   local next_s = {}
   local splitted = {prev_s:split(2 * opt.num_layers)}
   for layer_idx = 1, opt.num_layers do
@@ -166,6 +216,39 @@ function create_enc_lstm_unit(w_size)
     i[layer_idx] = next_h
   end
   local m = nn.gModule({x, prev_s}, {nn.Identity()(next_s)})
+  
+  return transfer_data(m)
+end
+
+function create_multi_enc_lstm_unit(num_enc, w_size_list)
+  local inputs = {}
+  local outputs = {}
+  for n = 1, num_enc do
+    -- input
+    local x = nn.Identity()()
+    local prev_s = nn.Identity()()
+    table.insert(inputs, x)
+    table.insert(inputs, prev_s)
+
+    local w_size = w_size_list[n]
+    local i = {[0] = nn.LookupTable(w_size, opt.embedding_size)(x):annotate{name='enc'..n..'_lookup'}}
+    local next_s = {}
+    local splitted = {prev_s:split(2 * opt.num_layers)}
+    for layer_idx = 1, opt.num_layers do
+      local prev_c = splitted[2 * layer_idx - 1]
+      local prev_h = splitted[2 * layer_idx]
+      local x_in = i[layer_idx - 1]
+      if opt.dropout > 0 then
+        x_in = nn.Dropout(opt.dropout)(x_in)
+      end
+      local next_c, next_h = lstm_enc(x_in, prev_c, prev_h, layer_idx, n)
+      table.insert(next_s, next_c)
+      table.insert(next_s, next_h)
+      i[layer_idx] = next_h
+    end
+    table.insert(outputs, nn.Identity()(next_s))
+  end
+  local m = nn.gModule(inputs, outputs)
   
   return transfer_data(m)
 end
@@ -218,6 +301,77 @@ function create_attention_unit(w_size)
   return transfer_data(m)
 end
 
+function create_multi_attention_unit(num_enc, w_size)
+  -- input
+  local inputs = {}
+  for n = 1, num_enc do
+    table.insert(inputs, nn.Identity()()) -- enc_s_top
+  end
+  table.insert(inputs, nn.Identity()()) -- dec_s_top
+
+  local dec_s_top = inputs[num_enc+1]
+  local enc_attentions_dec_s_top = {}
+  local num_hid_input
+
+  if opt.att == 'word' then
+    local enc_s_top_list = {}
+    for n = 1, num_enc do
+      table.insert(enc_s_top_list, inputs[n])
+    end
+    local enc_s_top = nn.JoinTable(2)(enc_s_top_list)
+    
+    -- (batch*length*H) * (batch*H*1) = (batch*length*1)
+    local dot = nn.MM()({enc_s_top, nn.View(opt.rnn_size,1):setNumInputDims(1)(dec_s_top)})
+    local attention = nn.SoftMax()(nn.Sum(3)(dot))
+
+    -- (batch*length*H)^T * (batch*length*1) = (batch*H*1)
+    local enc_attention = nn.MM(true, false)({enc_s_top, nn.View(-1, 1):setNumInputDims(1)(attention)})
+    table.insert(enc_attentions_dec_s_top, nn.Sum(3)(enc_attention))
+    
+    num_hid_input = 2
+  end
+
+  if opt.att == 'sent' then
+    for n = 1, num_enc do
+      local enc_s_top = inputs[n]
+      -- (batch*length*H) * (batch*H*1) = (batch*length*1)
+      local dot = nn.MM()({enc_s_top, nn.View(opt.rnn_size,1):setNumInputDims(1)(dec_s_top)})
+      local attention = nn.SoftMax()(nn.Sum(3)(dot))
+
+      -- (batch*length*H)^T * (batch*length*1) = (batch*H*1)
+      local enc_attention = nn.MM(true, false)({enc_s_top, nn.View(-1, 1):setNumInputDims(1)(attention)})
+      table.insert(enc_attentions_dec_s_top, nn.Sum(3)(enc_attention))
+    end
+    num_hid_input = num_enc+1
+  end
+
+  table.insert(enc_attentions_dec_s_top, dec_s_top)
+
+  local hid = nn.Tanh()(nn.Linear((num_hid_input)*opt.rnn_size, opt.rnn_size)(nn.JoinTable(2)(enc_attentions_dec_s_top)):annotate{name='att_hid'})
+  local h2y_in = hid
+  if opt.dropout > 0 then
+    h2y_in = nn.Dropout(opt.dropout)(h2y_in)
+  end
+  local h2y = nn.Linear(opt.rnn_size, w_size)(h2y_in):annotate{name='att_h2y'}
+  local pred = nn.LogSoftMax()(h2y)
+  local m = nn.gModule(inputs, {pred})
+  
+  return transfer_data(m)
+end
+
+function create_decoder_initializer(num_enc)
+  local inputs = {}
+  for n = 1, num_enc do
+    table.insert(inputs, nn.Identity()()) -- batch*H
+  end  
+
+  local x_in = nn.JoinTable(2)(inputs)
+  local hid = nn.Tanh()(nn.Linear(num_enc*opt.rnn_size, opt.rnn_size)(x_in))
+  local m = nn.gModule(inputs, {hid})
+
+  return transfer_data(m)
+end
+
 function setup_multi()
   -- load multilingual word managers + form_manager
   symbol_managers = torch.load(path.join(opt.data_dir, 'map.t7'))
@@ -230,20 +384,26 @@ function setup_multi()
 
   -- initialize model
   model = {}
-  model.enc_s = {}
-  model.dec_s = {}
-  model.ds = {}
-  model.save_enc_ds = {}
-  model.enc_s_top = transfer_data(torch.Tensor(opt.batch_size, opt.enc_seq_length, opt.rnn_size))
-  model.enc_ds_top = transfer_data(torch.Tensor(opt.batch_size, opt.enc_seq_length, opt.rnn_size))
 
-  for j = 0, opt.enc_seq_length do
-    model.enc_s[j] = {}
-    for d = 1, 2 * opt.num_layers do
-      model.enc_s[j][d] = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
-    end
+  model.enc_s_top = {}
+  model.enc_ds_top = {}
+  for n = 1, num_enc do
+    model.enc_s_top[n] = transfer_data(torch.Tensor(opt.batch_size, opt.enc_seq_length, opt.rnn_size))
+    model.enc_ds_top[n] = transfer_data(torch.Tensor(opt.batch_size, opt.enc_seq_length, opt.rnn_size))
   end
   
+  model.enc_s = {}
+  for n = 1, num_enc do
+    model.enc_s[n] = {}
+    for j = 0, opt.enc_seq_length do
+      model.enc_s[n][j] = {}
+      for d = 1, 2 * opt.num_layers do
+        model.enc_s[n][j][d] = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
+      end
+    end
+  end
+
+  model.dec_s = {}
   for i = 0, opt.dec_seq_length do
     model.dec_s[i] = {}
     for j = 0, opt.dec_seq_length do
@@ -254,27 +414,34 @@ function setup_multi()
     end
   end
 
+  model.ds = {}
+  model.save_enc_ds = {}
   for d = 1, 2 * opt.num_layers do
     model.ds[d] = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
-    model.save_enc_ds[d] = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
+  end
+
+  model.enc_ds = {}
+  for n = 1, num_enc do
+    model.enc_ds[n] = {}
+    model.save_enc_ds[n] = {}
+    for d = 1, 2 * opt.num_layers do
+      model.enc_ds[n][d] = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
+      model.save_enc_ds[n][d] = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
+    end
   end
 
   print("Creating encoder")
-  model.enc_rnn_unit = {}
-  for n = 1, num_enc do
-    model.enc_rnn_unit[n] = create_enc_lstm_unit(word_manager_vocab_size_list[n])
-  end
+  model.enc_rnn_unit = create_multi_enc_lstm_unit(num_enc, word_manager_vocab_size_list)
 
   print("Creating decoder")
   model.dec_rnn_unit = create_dec_lstm_unit(form_manager.vocab_size)
 
-  if opt.att == 'single' then
-    model.dec_att_unit = {}
-    for n = 1, num_enc do
-      model.dec_att_unit[n] = create_attention_unit(form_manager.vocab_size)
-    end
-  else -- shared attention
-    model.dec_att_unit = {create_attention_unit(form_manager.vocab_size)}
+  model.dec_att_unit = create_multi_attention_unit(num_enc, form_manager.vocab_size)
+
+  print("Creating decoder initializer")
+  model.dec_inits={}
+  for d = 1, 2 * opt.num_layers do
+    table.insert(model.dec_inits, transfer_data(nn.Max(2,1)))
   end
 
   model.criterions={}
@@ -283,19 +450,7 @@ function setup_multi()
   end
 
   -- collect all parameters to a vector
-  local model_params = {}
-  for n = 1, num_enc do
-    table.insert(model_params, model.enc_rnn_unit[n])
-  end
-  table.insert(model_params, model.dec_rnn_unit)
-  if opt.att == 'single' then
-    for n = 1, num_enc do
-      table.insert(model_params, model.dec_att_unit[n])
-    end
-  else
-    table.insert(model_params, model.dec_att_unit[1])
-  end
-  param_x, param_dx = combine_all_parameters(unpack(model_params))
+  param_x, param_dx = combine_all_parameters(model.enc_rnn_unit, model.dec_rnn_unit, model.dec_att_unit)
   print('number of parameters in the model: ' .. param_x:nElement())
   
   param_x:uniform(-opt.init_weight, opt.init_weight)
@@ -305,24 +460,20 @@ function setup_multi()
   end
 
   -- make a bunch of clones after flattening, as that reallocates memory (tips from char-rnn)
-  model.enc_rnns = {}
-  for n = 1, num_enc do
-    model.enc_rnns[n] = cloneManyTimes(model.enc_rnn_unit[n], opt.enc_seq_length)
-  end
+  model.enc_rnns = cloneManyTimes(model.enc_rnn_unit, opt.enc_seq_length)
   model.dec_rnns = cloneManyTimes(model.dec_rnn_unit, opt.dec_seq_length)
-  if opt.att == 'single' then
-    model.dec_atts = {}
-    for n = 1, num_enc do
-      model.dec_atts[n] = cloneManyTimes(model.dec_att_unit[n], opt.dec_seq_length)
-    end
-  else
-    model.dec_atts = {cloneManyTimes(model.dec_att_unit[1], opt.dec_seq_length)}
-  end
+  model.dec_atts = cloneManyTimes(model.dec_att_unit, opt.dec_seq_length)
 end
 
 function reset_ds()
   for d = 1, #model.ds do
     model.ds[d]:zero()
+  end
+
+  for n = 1, #model.enc_ds do
+    for d = 1, #model.enc_ds[n] do
+      model.enc_ds[n][d]:zero()
+    end
   end
 end
 
@@ -363,15 +514,12 @@ function add_ds_to_parent(cur_index, child_index, parent_ds_save_table)
 end
 
 function eval_training_multi(param_x_)
-  local n = lang_id
-  local att_id = 1
-  if opt.att == 'single' then att_id = n end
-  model.enc_rnn_unit[n]:training()
+  model.enc_rnn_unit:training()
   model.dec_rnn_unit:training()
-  model.dec_att_unit[att_id]:training()
-  for i = 1, #model.enc_rnns[n] do model.enc_rnns[n][i]:training() end
+  model.dec_att_unit:training()
+  for i = 1, #model.enc_rnns do model.enc_rnns[i]:training() end
   for i = 1, #model.dec_rnns do model.dec_rnns[i]:training() end
-  for i = 1, #model.dec_atts[att_id] do model.dec_atts[att_id][i]:training() end
+  for i = 1, #model.dec_atts do model.dec_atts[i]:training() end
 
   local dec_rnns_manager = seq2tree.ResourceManager()
   dec_rnns_manager:reset(#model.dec_rnns)
@@ -381,8 +529,15 @@ function eval_training_multi(param_x_)
   local num_enc = #enc_batch
 
   -- ship batch data to gpu
-  enc_batch[n] = float_transfer_data(enc_batch[n])
-  local enc_max_len = enc_batch[n]:size(2)
+  local enc_max_len = 0
+  local enc_max_len_list = {}
+  for n = 1, num_enc do
+    enc_max_len_list[n] = enc_batch[n]:size(2)
+    enc_batch[n] = float_transfer_data(enc_batch[n])
+    if enc_batch[n]:size(2) > enc_max_len then
+      enc_max_len = enc_batch[n]:size(2)
+    end
+  end
 
   -- forward propagation ===============================
   if param_x_ ~= param_x then
@@ -390,22 +545,57 @@ function eval_training_multi(param_x_)
   end
 
   -- encode
-  for i = 1, #model.enc_s[0] do
-    model.enc_s[0][i]:zero()
+  for n = 1, num_enc do
+    for i = 1, #model.enc_s[n][0] do
+      model.enc_s[n][0][i]:zero()
+    end
   end
 
+  local inputs = {}
   for i = 1, enc_max_len do
-    local tmp = model.enc_rnns[n][i]:forward({enc_batch[n][{{}, i}], model.enc_s[i - 1]})
-    copy_table(model.enc_s[i], tmp)
+    inputs[i] = {}
+    for n = 1, num_enc do
+      table.insert(inputs[i], enc_batch[n][{{}, i}])
+      table.insert(inputs[i], model.enc_s[n][i - 1])
+    end
+    local tmp = model.enc_rnns[i]:forward(inputs[i])
+    if num_enc == 1 then
+      copy_table(model.enc_s[1][i], tmp)
+    else
+      for n = 1, num_enc do
+        copy_table(model.enc_s[n][i], tmp[n])
+      end
+    end
+    -- zero padding inputs
+    -- for n = 1, num_enc do
+    --   for j = 1, opt.batch_size do
+    --     if i > enc_len_batch[n][j] then
+    --       model.enc_s[n][i][2*opt.num_layers][j]:zero()
+    --     end
+    --   end
+    -- end
   end
 
   -- build (batch*length*H) for attention score computation
-  model.enc_s_top:zero()
-  for i = 1, enc_max_len do
-    model.enc_s_top[{{},i,{}}]:copy(model.enc_s[i][2*opt.num_layers])
+  local enc_s_top_views = {}
+  for n = 1, num_enc do
+    model.enc_s_top[n]:zero()
+    for i = 1, enc_max_len_list[n] do
+      model.enc_s_top[n][{{},i,{}}]:copy(model.enc_s[n][i][2*opt.num_layers])
+    end
+    table.insert(enc_s_top_views, model.enc_s_top[n][{{},{1, enc_max_len_list[n]},{}}])
   end
 
-  local enc_s_top_view = model.enc_s_top[{{},{1, enc_max_len},{}}]
+  -- last encoder state for each language
+  local last_enc_s = {}
+  for j = 1, 2 * opt.num_layers do
+    last_enc_s[j] = transfer_data(torch.zeros(opt.batch_size, num_enc, opt.rnn_size))
+    for i = 1, opt.batch_size do
+      for n = 1, num_enc do
+        last_enc_s[j][i][n]:copy(model.enc_s[n][enc_len_batch[n][i]][j][i])
+      end
+    end
+  end
   
   -- decode
   local queue_tree = {}
@@ -461,9 +651,10 @@ function eval_training_multi(param_x_)
     end
     if (cur_index==1) then
       -- initialize using encoding results
-      for i = 1, opt.batch_size do
-        for j = 1, 2 * opt.num_layers do
-          model.dec_s[1][0][j][{i,{}}]:copy(model.enc_s[enc_len_batch[n][i]][j][{i,{}}])
+      for j = 1, 2 * opt.num_layers do
+        local dec_init_out = model.dec_inits[j]:forward(last_enc_s[j])
+        for i = 1, opt.batch_size do
+          model.dec_s[1][0][j][{i,{}}]:copy(dec_init_out[{i,{}}])
         end
       end
     else
@@ -484,7 +675,9 @@ function eval_training_multi(param_x_)
     for i = 1, dec_batch[cur_index]:size(2) - 1 do
       local i_dec_rnns = dec_rnns_manager:allocate2(cur_index, i)
       model.dec_s[cur_index][i] = model.dec_rnns[i_dec_rnns]:forward({dec_batch[cur_index][{{}, i}], model.dec_s[cur_index][i - 1], parent_h})
-      softmax_predictions[cur_index][i] = model.dec_atts[att_id][i_dec_rnns]:forward({enc_s_top_view, model.dec_s[cur_index][i][2*opt.num_layers]})
+      enc_s_top_views[num_enc+1] = model.dec_s[cur_index][i][2*opt.num_layers] -- last one is decoder's state
+      softmax_predictions[cur_index][i] = model.dec_atts[i_dec_rnns]:forward(enc_s_top_views)
+      
       loss = loss + model.criterions[i_dec_rnns]:forward(softmax_predictions[cur_index][i], dec_batch[cur_index][{{}, i+1}])
     end
 
@@ -494,8 +687,11 @@ function eval_training_multi(param_x_)
 
   -- backward propagation ===============================
   param_dx:zero()
-  model.enc_ds_top:zero()
-  local enc_ds_top_view = model.enc_ds_top[{{},{1, enc_max_len},{}}]
+  local enc_ds_top_views = {}
+  for n = 1, num_enc do
+    model.enc_ds_top[n]:zero()
+    enc_ds_top_views[n] = model.enc_ds_top[n][{{},{1, enc_max_len_list[n]},{}}]
+  end
 
   local parent_ds_save_table = {}
   local save_enc_parent_h_ds = transfer_data(torch.zeros(opt.batch_size, opt.rnn_size))
@@ -507,9 +703,12 @@ function eval_training_multi(param_x_)
       add_ds_to_parent(cur_index, i, parent_ds_save_table)
       local crit_dx = model.criterions[i_dec_rnns]:backward(softmax_predictions[cur_index][i], dec_batch[cur_index][{{}, i+1}])
 
-      local tmp1, tmp2 = unpack(model.dec_atts[att_id][i_dec_rnns]:backward({enc_s_top_view, model.dec_s[cur_index][i][2*opt.num_layers]}, crit_dx))
-      enc_ds_top_view:add(tmp1)
-      model.ds[2*opt.num_layers]:add(tmp2)
+      enc_s_top_views[num_enc+1] = model.dec_s[cur_index][i][2*opt.num_layers]
+      local att_grad_input = model.dec_atts[i_dec_rnns]:backward(enc_s_top_views, crit_dx)
+      for n = 1, num_enc do
+        enc_ds_top_views[n]:add(att_grad_input[n])
+      end
+      model.ds[2*opt.num_layers]:add(att_grad_input[num_enc+1])
       
       local _, tmp, parent_h_ds = unpack(model.dec_rnns[i_dec_rnns]:backward({dec_batch[cur_index][{{}, i}], model.dec_s[cur_index][i - 1], parent_h}, model.ds))
       copy_table(model.ds, tmp)
@@ -537,44 +736,68 @@ function eval_training_multi(param_x_)
       end
     end
   end
-  model.ds[2*opt.num_layers]:add(save_enc_parent_h_ds)
 
-  -- back-propagate to encoder
-  copy_table(model.save_enc_ds, model.ds)
-  local no_blank = false
-  for i = enc_max_len, 1, -1 do
-    if (not no_blank) then
-      no_blank = true
-      for j = 1, opt.batch_size do
-        if i > enc_len_batch[n][j] then
-          for k = 1, #model.ds do
-            model.ds[k][{j,{}}]:zero()
-          end
-          no_blank = false
-        elseif i == enc_len_batch[n][j] then
-          for k = 1, #model.ds do
-            model.ds[k][{j,{}}]:copy(model.save_enc_ds[k][{j,{}}])
-          end
-        end
+  model.ds[2*opt.num_layers]:add(save_enc_parent_h_ds)
+  for j = 1, 2 * opt.num_layers do
+    local init_grad_input = model.dec_inits[j]:backward(last_enc_s[j], model.ds[j])
+    for i = 1, opt.batch_size do
+      for n = 1, num_enc do
+        model.enc_ds[n][j][i]:add(init_grad_input[i][n])
       end
     end
-    -- add gradient from attention layer
-    if no_blank then
-      model.ds[2*opt.num_layers]:add(model.enc_ds_top[{{},i,{}}])
-    else
-      for j = 1, opt.batch_size do
-        if i <= enc_len_batch[n][j] then
-          model.ds[2*opt.num_layers][{j,{}}]:add(model.enc_ds_top[{j,i,{}}])
+  end
+
+  -- back-propagate to encoder
+  for n = 1, num_enc do
+    copy_table(model.save_enc_ds[n], model.enc_ds[n])
+  end
+  local no_blank_list = {}
+  for n = 1, num_enc do no_blank_list[n] = false end
+  for i = enc_max_len, 1, -1 do
+    for n = 1, num_enc do
+      local no_blank = no_blank_list[n]
+      if (not no_blank) then
+        no_blank = true
+        for j = 1, opt.batch_size do
+          if i > enc_len_batch[n][j] then
+            for k = 1, #model.enc_ds[n] do
+              model.enc_ds[n][k][{j,{}}]:zero()
+            end
+            no_blank = false
+          elseif i == enc_len_batch[n][j] then
+            for k = 1, #model.enc_ds[n] do
+              model.enc_ds[n][k][{j,{}}]:copy(model.save_enc_ds[n][k][{j,{}}])
+            end
+          end
+        end
+        no_blank_list[n] = no_blank
+      end
+      -- add gradient from attention layer
+      if no_blank then
+        model.enc_ds[n][2*opt.num_layers]:add(model.enc_ds_top[n][{{},i,{}}])
+      else
+        for j = 1, opt.batch_size do
+          if i <= enc_len_batch[n][j] then
+            model.enc_ds[n][2*opt.num_layers][{j,{}}]:add(model.enc_ds_top[n][{j,i,{}}])
+          end
         end
       end
     end
     -- bp
-    local tmp = model.enc_rnns[n][i]:backward({enc_batch[n][{{}, i}], model.enc_s[i - 1]}, model.ds)[2]
-    copy_table(model.ds, tmp)
+    local tmp
+    if num_enc == 1 then
+      tmp = model.enc_rnns[i]:backward(inputs[i], model.enc_ds[1])
+    else
+      tmp = model.enc_rnns[i]:backward(inputs[i], model.enc_ds)
+    end
+    for n = 1, num_enc do
+      copy_table(model.enc_ds[n], tmp[2*n])
+    end
   end
 
   -- clip gradient element-wise
   param_dx:clamp(-opt.grad_clip, opt.grad_clip)
+
   return loss, param_dx
 end
 
@@ -608,17 +831,19 @@ function main()
   cmd:option('-grad_clip',5,'clip gradients at this value')
 
   cmd:option('-embedding_size', 200, 'dimension of word embedding')
-  cmd:option('-att', 'single', 'attention type: single or shared')
+  cmd:option('-att', 'word', 'attention type: word or sentence')
   cmd:option('-init_weight_dir', '', 'pretrained model path')
   cmd:option('-lang', '', 'languages')
   cmd:option('-save_every', 10, 'save model after every N epochs')
-  cmd:option('-pretrain_number', 1, 'index of pretrained model')
-  cmd:option('-switch_after',1,'switch to next language after this iteration')
+  cmd:option('-lang_dropout', 0, 'probability to exclude a language during training')
+  cmd:option('-train', 'train', 'train file')
+  cmd:option('-pretrain_number', 1, 'pretrained model number')
   cmd:text()
   opt = cmd:parse(arg)
 
   local languages = opt.lang:strip():split(',')
   opt.lang = {}
+  init_lang_id = 1
   for i = 1, #languages do
     table.insert(opt.lang, languages[i])
   end
@@ -631,7 +856,7 @@ function main()
 
   -- load data
   train_loader = seq2tree.MinibatchLoader()
-  train_loader:create(opt, 'train')
+  train_loader:create(opt, opt.train)
 
   -- make sure output directory exists
   if not path.exists(opt.checkpoint_dir) then
@@ -653,16 +878,12 @@ function main()
     checkpoint.enc_rnn_unit = model.enc_rnn_unit
     checkpoint.dec_rnn_unit = model.dec_rnn_unit
     checkpoint.dec_att_unit = model.dec_att_unit
-    checkpoint.dec_init_unit = model.dec_init_unit
     checkpoint.opt = opt
     checkpoint.i = i
     checkpoint.epoch = epoch
 
     torch.save(string.format('%s/model.t7', opt.checkpoint_dir), checkpoint)
   end
-
-  local lang_counter = 1
-  lang_id = 1
 
   for i = 1, iterations do
     local epoch = i / train_loader.num_batch
@@ -680,8 +901,7 @@ function main()
 
     -- exponential learning rate decay
     if (opt.opt_method == 0) then
-      -- note: number of langs * 1 epoch
-      if i % (train_loader.num_batch * #opt.lang) == 0 and opt.learning_rate_decay < 1 then
+      if i % train_loader.num_batch == 0 and opt.learning_rate_decay < 1 then
         if epoch >= opt.learning_rate_decay_after then
           local decay_factor = opt.learning_rate_decay
           optim_state.learningRate = optim_state.learningRate * decay_factor -- decay it
@@ -695,7 +915,7 @@ function main()
     end
 
     if i % opt.print_every == 0 then
-      print(string.format("%d/%d, lang = %s, train_loss = %6.8f, time/batch = %.2fs", i, iterations, opt.lang[lang_id], train_loss, time))
+      print(string.format("%d/%d, train_loss = %6.8f, time/batch = %.2fs", i, iterations, train_loss, time))
     end
 
     -- on last iteration
@@ -723,15 +943,6 @@ function main()
     if loss[1] ~= loss[1] then
       print('loss is NaN.  This usually indicates a bug.')
       break -- halt
-    end
-
-    if opt.switch_after == lang_counter then
-      -- go to next language
-      lang_id = lang_id + 1
-      if lang_id > #opt.lang then lang_id = 1 end
-      lang_counter = 1
-    else
-      lang_counter = lang_counter + 1
     end
   end
 end
