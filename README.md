@@ -46,9 +46,9 @@ done
 
 # MULTI (single-source)
 ATT_S=shared # single or shared
-./run_multi_s.sh seq2tree-multi geoqueries single_setting en,de,el,th $CONFIG_MULTI_S $ATT_S $EXP_ID
+./run_multi_s.sh seq2tree-multi geoqueries single_setting en,de,el,th $CONFIG_MULTI_S $ATT_S $EXP_ID $GPU_ID
 
 # MULTI (multi-source)
 ATT_M=sent # word or sent
-./run_multi_m.sh seq2tree-multi geoqueries multi_setting en,de,el,th $CONFIG_MULTI_M $ATT_M $EXP_ID
+./run_multi_m.sh seq2tree-multi geoqueries multi_setting en,de,el,th $CONFIG_MULTI_M $ATT_M $EXP_ID $GPU_ID
 ```
