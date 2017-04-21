@@ -42,7 +42,7 @@ for lang in en de el th; do
 done
 
 # RANKING
-./run_ranking.sh $GPU_ID geoqueries $CONFIG_MONO
+./run_ranking.sh $GPU_ID geoqueries $CONFIG_MONO $EXP_ID
 
 # MULTI (single-source)
 ATT_S=shared # single or shared

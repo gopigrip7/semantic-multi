@@ -2,7 +2,8 @@ set -e -x
 gpuid=$1
 data=$2
 params_file=$3
-shift 3
+param_id=$4
+shift 4
 if [ $data = "geoqueries" ]; then
     languages="en de el th"
 elif [ $data = "atis" ]; then
@@ -20,7 +21,9 @@ for lang in $languages; do
     prefix=0
     while read -r param; do
         prefix=$((prefix+1))
-        ./decode.sh seq2tree $data attention $lang $params_file $prefix $gpuid > logs/$data-$lang/decode-$lang-$prefix.log 2>&1
+        if [ $prefix -eq $param_id ] ; then
+            ./decode.sh seq2tree $data attention $lang $params_file $prefix $gpuid > logs/$data-$lang/decode-$lang-$prefix.log 2>&1
+        fi
     done < $params_file
 done
 
@@ -37,19 +40,21 @@ fi
 prefix=0
 while read -r param; do
     prefix=$((prefix+1))
-    for langs in $langset; do
-        files=""
-        for lang in `echo $langs | awk -F, '{for (i=1;i<=NF;i++)print $i}'`; do
-            files="$files $DUMP_DIR/$lang-$prefix/model.t7.nbest"
-        done
-        output=$DUMP_DECODE_DIR/$langs-$prefix.out
-        python $DECODE_DIR/aggregate.py $files $normalize > $output
-        
-        mkdir -p logs/$data-ranking-$langs
-        logfile=$PWD_DIR/logs/$data-ranking-$langs/aggregate-$prefix.log
+    if [ $prefix -eq $param_id ] ; then
+        for langs in $langset; do
+            files=""
+            for lang in `echo $langs | awk -F, '{for (i=1;i<=NF;i++)print $i}'`; do
+                files="$files $DUMP_DIR/$lang-$prefix/model.t7.nbest"
+            done
+            output=$DUMP_DECODE_DIR/$langs-$prefix.out
+            python $DECODE_DIR/aggregate.py $files $normalize > $output
+            
+            mkdir -p logs/$data-ranking-$langs
+            logfile=$PWD_DIR/logs/$data-ranking-$langs/aggregate-$prefix.log
 
-        cd $WORK_DIR
-        CUDA_VISIBLE_DEVICES=$gpuid th decode/evaluate.lua -data_dir $WORK_DIR/data/en -input test.orig.t7 -output_prefix $DUMP_DECODE_DIR/$langs-$prefix -prediction $output -display 0 > $logfile 2>&1
-        cd $PWD_DIR
-    done
+            cd $WORK_DIR
+            CUDA_VISIBLE_DEVICES=$gpuid th decode/evaluate.lua -data_dir $WORK_DIR/data/en -input test.orig.t7 -output_prefix $DUMP_DECODE_DIR/$langs-$prefix -prediction $output -display 0 > $logfile 2>&1
+            cd $PWD_DIR
+        done
+    fi
 done < $params_file
