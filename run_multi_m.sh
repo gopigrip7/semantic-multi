@@ -23,6 +23,7 @@ if [ $3 = "single_setting" ] || [ $3 = "multi_setting" ]; then
       DUMP_DIR=$WORK_DIR/dump_$3/"$exp_name"-$prefix
       mkdir -p $DUMP_DIR
       logfile=$PWD_DIR/logs/$exp_name/train-$prefix.log
+      mkdir -p $PWD_DIR/logs/$exp_name
       CUDA_VISIBLE_DEVICES=$GPU_ID th $3/main.lua -data_dir $WORK_DIR/data/$exp_name -checkpoint_dir $DUMP_DIR \
       -lang $4 -att $6 \
       -init_weight_dir $INIT_DIR \
